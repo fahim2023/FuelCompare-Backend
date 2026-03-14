@@ -6,6 +6,22 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.18.0"
-  }
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^4.22.1",
+    "node-fetch": "^3.3.2"
+  },
+  "description": "",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fahim2023/fuel-proxy.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/fahim2023/fuel-proxy/issues"
+  },
+  "homepage": "https://github.com/fahim2023/fuel-proxy#readme"
 }
