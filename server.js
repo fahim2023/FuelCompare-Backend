@@ -431,6 +431,53 @@ app.get("/station/:id", async (req, res) => {
   }
 });
 
+// GET /station-live/:id — returns station with live prices from cache
+app.get("/station-live/:id", async (req, res) => {
+  try {
+    // If stations are cached, use them
+    if (cachedStations && Date.now() < stationsExpiry) {
+      const station = cachedStations.stations.find(
+        (s) => String(s.id) === String(req.params.id),
+      );
+      if (station) {
+        return res.json({ ...station, fuels: station.prices || {} });
+      }
+    }
+
+    // Cache is empty — trigger a fresh fetch
+    let govStations = [];
+    try {
+      govStations = await fetchGovStations();
+    } catch (err) {
+      console.warn(`GOV.UK failed: ${err.message}`);
+    }
+
+    const retailerStations = await fetchRetailerStations();
+    const govPostcodes = new Set(
+      govStations.map((s) => s.postcode?.trim().toUpperCase()).filter(Boolean),
+    );
+    const uniqueRetailer = retailerStations.filter((s) => {
+      const pc = s.postcode?.trim().toUpperCase();
+      return !pc || !govPostcodes.has(pc);
+    });
+
+    const stations = [...govStations, ...uniqueRetailer];
+
+    // Cache it
+    cachedStations = { stations, count: stations.length };
+    stationsExpiry = Date.now() + 10 * 60 * 1000;
+
+    const station = stations.find(
+      (s) => String(s.id) === String(req.params.id),
+    );
+
+    if (!station) return res.status(404).json({ error: "Station not found" });
+    res.json({ ...station, fuels: station.prices || {} });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /price-history — national daily averages for trends chart
 app.get("/price-history", async (req, res) => {
   try {
