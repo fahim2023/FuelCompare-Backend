@@ -425,54 +425,19 @@ app.get("/station/:id", async (req, res) => {
       .collection("stations")
       .findOne({ stationId: req.params.id });
     if (!station) return res.status(404).json({ error: "Station not found" });
-    res.json(station);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
-// GET /station-live/:id — returns station with live prices from cache
-app.get("/station-live/:id", async (req, res) => {
-  try {
-    // If stations are cached, use them
-    if (cachedStations && Date.now() < stationsExpiry) {
-      const station = cachedStations.stations.find(
-        (s) => String(s.id) === String(req.params.id),
-      );
-      if (station) {
-        return res.json({ ...station, fuels: station.prices || {} });
-      }
-    }
+    const today = new Date().toISOString().slice(0, 10);
+    const priceRecords = await database
+      .collection("price_history")
+      .find({ stationId: req.params.id, snapshotDate: today })
+      .toArray();
 
-    // Cache is empty — trigger a fresh fetch
-    let govStations = [];
-    try {
-      govStations = await fetchGovStations();
-    } catch (err) {
-      console.warn(`GOV.UK failed: ${err.message}`);
-    }
-
-    const retailerStations = await fetchRetailerStations();
-    const govPostcodes = new Set(
-      govStations.map((s) => s.postcode?.trim().toUpperCase()).filter(Boolean),
-    );
-    const uniqueRetailer = retailerStations.filter((s) => {
-      const pc = s.postcode?.trim().toUpperCase();
-      return !pc || !govPostcodes.has(pc);
+    const prices = {};
+    priceRecords.forEach((r) => {
+      prices[r.fuelType] = r.price;
     });
 
-    const stations = [...govStations, ...uniqueRetailer];
-
-    // Cache it
-    cachedStations = { stations, count: stations.length };
-    stationsExpiry = Date.now() + 10 * 60 * 1000;
-
-    const station = stations.find(
-      (s) => String(s.id) === String(req.params.id),
-    );
-
-    if (!station) return res.status(404).json({ error: "Station not found" });
-    res.json({ ...station, fuels: station.prices || {} });
+    res.json({ ...station, prices, fuels: prices });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
