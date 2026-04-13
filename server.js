@@ -158,7 +158,7 @@ async function fetchGovStations() {
             fp.fuel_type.includes("_") ?
               fp.fuel_type.split("_")[0]
             : fp.fuel_type;
-          prices[fuelType] = fp.price;
+          if (fp.price >= 100 && fp.price <= 220) prices[fuelType] = fp.price;
         }
         if (
           fp.price_last_updated &&
@@ -315,7 +315,7 @@ async function saveDailySnapshot() {
     for (const s of allStations) {
       for (const [fuelType, price] of Object.entries(s.prices || {})) {
         if (!VALID_FUEL_TYPES.includes(fuelType)) continue;
-        if (price == null || price < 50 || price > 300) continue;
+        if (price == null || price < 100 || price > 200) continue;
         priceRecords.push({
           stationId: s.id,
           brand: s.brand,
