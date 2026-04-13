@@ -176,6 +176,26 @@ async function fetchGovStations() {
         prices: {},
         priceLastUpdated: null,
       };
+
+      // Parse opening hours
+      const openingHours =
+        s.opening_times?.usual_days ?
+          {
+            monday: s.opening_times.usual_days.monday || null,
+            tuesday: s.opening_times.usual_days.tuesday || null,
+            wednesday: s.opening_times.usual_days.wednesday || null,
+            thursday: s.opening_times.usual_days.thursday || null,
+            friday: s.opening_times.usual_days.friday || null,
+            saturday: s.opening_times.usual_days.saturday || null,
+            sunday: s.opening_times.usual_days.sunday || null,
+          }
+        : null;
+
+      const is24Hours =
+        openingHours ?
+          Object.values(openingHours).some((d) => d?.is_24_hours === true)
+        : false;
+
       return {
         id: s.node_id,
         brand: s.brand_name || s.trading_name || "Unknown",
@@ -189,6 +209,11 @@ async function fetchGovStations() {
         lng: s.location?.longitude ?? null,
         prices: priceData.prices,
         priceLastUpdated: priceData.priceLastUpdated,
+        phone: s.public_phone_number || null,
+        isMotorway: s.is_motorway_service_station || false,
+        isSupermarket: s.is_supermarket_service_station || false,
+        is24Hours,
+        openingHours,
         source: "gov",
       };
     })
@@ -288,6 +313,11 @@ async function saveDailySnapshot() {
             source: s.source,
             active: true,
             lastSeen: nowFormatted,
+            phone: s.phone || null,
+            isMotorway: s.isMotorway || false,
+            isSupermarket: s.isSupermarket || false,
+            is24Hours: s.is24Hours || false,
+            openingHours: s.openingHours || null,
           },
         },
         upsert: true,
@@ -315,7 +345,7 @@ async function saveDailySnapshot() {
     for (const s of allStations) {
       for (const [fuelType, price] of Object.entries(s.prices || {})) {
         if (!VALID_FUEL_TYPES.includes(fuelType)) continue;
-        if (price == null || price < 100 || price > 200) continue;
+        if (price == null || price < 100 || price > 220) continue;
         priceRecords.push({
           stationId: s.id,
           brand: s.brand,
@@ -323,7 +353,7 @@ async function saveDailySnapshot() {
           fuelType,
           price,
           snapshotDate: today,
-          dayOfWeek: new Date().getDay(), // 0=Sun, 1=Mon ... 6=Sat
+          dayOfWeek: new Date().getDay(),
           created_at: nowFormatted,
         });
       }
@@ -506,7 +536,6 @@ app.get("/price-stats", async (req, res) => {
     const fuelType = req.query.fuelType || "E10";
     const dbFuelField = `avg_${fuelType.toLowerCase()}`;
 
-    // Get last 14 days of snapshots
     const since14 = new Date();
     since14.setDate(since14.getDate() - 14);
     const snapshots = await database
@@ -532,7 +561,6 @@ app.get("/price-stats", async (req, res) => {
         Math.round((thisWeekAvg - lastWeekAvg) * 10) / 10
       : null;
 
-    // Price velocity — difference between last 3 days
     const last3 = snapshots
       .slice(-3)
       .map((s) => s[dbFuelField])
@@ -542,7 +570,6 @@ app.get("/price-stats", async (req, res) => {
         Math.round((last3[last3.length - 1] - last3[0]) * 10) / 10
       : null;
 
-    // Cheapest day of week from price_history
     const since90 = new Date();
     since90.setDate(since90.getDate() - 90);
     const dayAggs = await database
@@ -636,7 +663,7 @@ app.get("/brand-averages", async (req, res) => {
             count: { $sum: 1 },
           },
         },
-        { $match: { count: { $gte: 3 } } }, // only brands with enough data
+        { $match: { count: { $gte: 3 } } },
         { $sort: { avgPrice: 1 } },
         { $limit: 20 },
       ])
