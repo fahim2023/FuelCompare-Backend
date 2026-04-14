@@ -114,6 +114,7 @@ async function getToken() {
 async function fetchGovStations() {
   const token = await getToken();
   const allSites = [];
+
   for (let batch = 1; batch <= 40; batch++) {
     const res = await fetch(`${SITES_URL}?batch-number=${batch}`, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
@@ -154,10 +155,8 @@ async function fetchGovStations() {
     if (Array.isArray(p.fuel_prices)) {
       for (const fp of p.fuel_prices) {
         if (fp.fuel_type && fp.price != null) {
-          const fuelType =
-            fp.fuel_type.includes("_") ?
-              fp.fuel_type.split("_")[0]
-            : fp.fuel_type;
+          // Use fuel_type as-is (B7S, B7P, E10, E5, B10, HVO)
+          const fuelType = fp.fuel_type;
           if (fp.price >= 100 && fp.price <= 220) prices[fuelType] = fp.price;
         }
         if (
@@ -177,7 +176,6 @@ async function fetchGovStations() {
         priceLastUpdated: null,
       };
 
-      // Parse opening hours
       const openingHours =
         s.opening_times?.usual_days ?
           {
@@ -327,7 +325,6 @@ async function saveDailySnapshot() {
     for (let i = 0; i < stationOps.length; i += 1000)
       await stationsCol.bulkWrite(stationOps.slice(i, i + 1000));
 
-    // Mark stations not seen today as inactive
     const inactive = await stationsCol.updateMany(
       { stationId: { $nin: todaySeenIds }, active: { $ne: false } },
       { $set: { active: false, deactivatedAt: nowFormatted } },
@@ -339,7 +336,7 @@ async function saveDailySnapshot() {
 
     // 2. Insert price history records
     const priceCol = database.collection("price_history");
-    const VALID_FUEL_TYPES = ["E10", "B7", "E5", "SDV5"];
+    const VALID_FUEL_TYPES = ["E10", "B7S", "E5", "B7P", "B10", "HVO"];
     const priceRecords = [];
 
     for (const s of allStations) {
@@ -364,7 +361,7 @@ async function saveDailySnapshot() {
     console.log(`[snapshot] Inserted ${priceRecords.length} price records`);
 
     // 3. Save national averages snapshot
-    const buckets = { E10: [], B7: [], E5: [], SDV5: [] };
+    const buckets = { E10: [], B7S: [], E5: [], B7P: [], B10: [], HVO: [] };
     for (const r of priceRecords) {
       if (buckets[r.fuelType]) buckets[r.fuelType].push(r.price);
     }
@@ -374,28 +371,23 @@ async function saveDailySnapshot() {
         Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10
       : null;
 
+    const minOf = (arr) =>
+      arr.length ? Math.round(Math.min(...arr) * 10) / 10 : null;
+    const maxOf = (arr) =>
+      arr.length ? Math.round(Math.max(...arr) * 10) / 10 : null;
+
     const snapshot = {
       date: today,
       avg_e10: avg(buckets.E10),
-      avg_b7: avg(buckets.B7),
+      avg_b7s: avg(buckets.B7S),
       avg_e5: avg(buckets.E5),
-      avg_sdv5: avg(buckets.SDV5),
-      min_e10:
-        buckets.E10.length ?
-          Math.round(Math.min(...buckets.E10) * 10) / 10
-        : null,
-      max_e10:
-        buckets.E10.length ?
-          Math.round(Math.max(...buckets.E10) * 10) / 10
-        : null,
-      min_b7:
-        buckets.B7.length ?
-          Math.round(Math.min(...buckets.B7) * 10) / 10
-        : null,
-      max_b7:
-        buckets.B7.length ?
-          Math.round(Math.max(...buckets.B7) * 10) / 10
-        : null,
+      avg_b7p: avg(buckets.B7P),
+      avg_b10: avg(buckets.B10),
+      avg_hvo: avg(buckets.HVO),
+      min_e10: minOf(buckets.E10),
+      max_e10: maxOf(buckets.E10),
+      min_b7s: minOf(buckets.B7S),
+      max_b7s: maxOf(buckets.B7S),
       station_count: allStations.length,
       price_records: priceRecords.length,
       source: "gov",
@@ -404,7 +396,7 @@ async function saveDailySnapshot() {
 
     await snapshotCol.insertOne(snapshot);
     console.log(
-      `[snapshot] Done: E10=${snapshot.avg_e10}p, B7=${snapshot.avg_b7}p, records=${priceRecords.length}`,
+      `[snapshot] Done: E10=${snapshot.avg_e10}p, B7S=${snapshot.avg_b7s}p, records=${priceRecords.length}`,
     );
     return { success: true, snapshot };
   } catch (err) {
@@ -415,7 +407,6 @@ async function saveDailySnapshot() {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
-// GET /fuel-stations
 app.get("/fuel-stations", async (req, res) => {
   try {
     if (cachedStations && Date.now() < stationsExpiry)
@@ -447,7 +438,6 @@ app.get("/fuel-stations", async (req, res) => {
   }
 });
 
-// GET /station/:id
 app.get("/station/:id", async (req, res) => {
   try {
     const database = await getDb();
@@ -473,18 +463,16 @@ app.get("/station/:id", async (req, res) => {
   }
 });
 
-// GET /price-history — national daily averages for trends chart
 app.get("/price-history", async (req, res) => {
   try {
     const database = await getDb();
     const days = parseInt(req.query.days) || 90;
     const since = new Date();
     since.setDate(since.getDate() - days);
-    const sinceStr = since.toISOString().slice(0, 10);
 
     const snapshots = await database
       .collection("fuel_price_snapshots")
-      .find({ date: { $gte: sinceStr } })
+      .find({ date: { $gte: since.toISOString().slice(0, 10) } })
       .sort({ date: 1 })
       .toArray();
 
@@ -494,20 +482,18 @@ app.get("/price-history", async (req, res) => {
   }
 });
 
-// GET /station-history/:stationId — per-station price history
 app.get("/station-history/:stationId", async (req, res) => {
   try {
     const database = await getDb();
     const days = parseInt(req.query.days) || 90;
     const since = new Date();
     since.setDate(since.getDate() - days);
-    const sinceStr = since.toISOString().slice(0, 10);
 
     const records = await database
       .collection("price_history")
       .find({
         stationId: req.params.stationId,
-        snapshotDate: { $gte: sinceStr },
+        snapshotDate: { $gte: since.toISOString().slice(0, 10) },
       })
       .sort({ snapshotDate: 1 })
       .toArray();
@@ -529,7 +515,6 @@ app.get("/station-history/:stationId", async (req, res) => {
   }
 });
 
-// GET /price-stats — week on week, cheapest day, price velocity
 app.get("/price-stats", async (req, res) => {
   try {
     const database = await getDb();
@@ -601,6 +586,7 @@ app.get("/price-stats", async (req, res) => {
       "Friday",
       "Saturday",
     ];
+
     const cheapestDay =
       dayAggs.length ?
         {
@@ -615,7 +601,6 @@ app.get("/price-stats", async (req, res) => {
           avgPrice: Math.round(dayAggs[dayAggs.length - 1].avgPrice * 10) / 10,
         }
       : null;
-
     const allDays = dayAggs
       .map((d) => ({
         day: DAY_NAMES[d._id],
@@ -640,7 +625,6 @@ app.get("/price-stats", async (req, res) => {
   }
 });
 
-// GET /brand-averages — average price per brand
 app.get("/brand-averages", async (req, res) => {
   try {
     const database = await getDb();
@@ -648,12 +632,16 @@ app.get("/brand-averages", async (req, res) => {
     const days = parseInt(req.query.days) || 7;
     const since = new Date();
     since.setDate(since.getDate() - days);
-    const sinceStr = since.toISOString().slice(0, 10);
 
     const results = await database
       .collection("price_history")
       .aggregate([
-        { $match: { fuelType, snapshotDate: { $gte: sinceStr } } },
+        {
+          $match: {
+            fuelType,
+            snapshotDate: { $gte: since.toISOString().slice(0, 10) },
+          },
+        },
         {
           $group: {
             _id: "$brand",
@@ -683,7 +671,6 @@ app.get("/brand-averages", async (req, res) => {
   }
 });
 
-// GET /regional-averages — average price per county/region
 app.get("/regional-averages", async (req, res) => {
   try {
     const database = await getDb();
@@ -691,7 +678,6 @@ app.get("/regional-averages", async (req, res) => {
     const days = parseInt(req.query.days) || 7;
     const since = new Date();
     since.setDate(since.getDate() - days);
-    const sinceStr = since.toISOString().slice(0, 10);
 
     const results = await database
       .collection("price_history")
@@ -699,7 +685,7 @@ app.get("/regional-averages", async (req, res) => {
         {
           $match: {
             fuelType,
-            snapshotDate: { $gte: sinceStr },
+            snapshotDate: { $gte: since.toISOString().slice(0, 10) },
             county: { $ne: "" },
           },
         },
@@ -731,7 +717,6 @@ app.get("/regional-averages", async (req, res) => {
   }
 });
 
-// GET /cheapest — cheapest stations for a given fuel type and date
 app.get("/cheapest", async (req, res) => {
   try {
     const database = await getDb();
@@ -768,7 +753,6 @@ app.get("/cheapest", async (req, res) => {
   }
 });
 
-// POST /save-snapshot — manually trigger
 app.post("/save-snapshot", async (req, res) => {
   try {
     const result = await saveDailySnapshot();
@@ -778,7 +762,6 @@ app.post("/save-snapshot", async (req, res) => {
   }
 });
 
-// GET /clear-cache
 app.get("/clear-cache", (req, res) => {
   cachedStations = null;
   stationsExpiry = 0;
@@ -787,7 +770,6 @@ app.get("/clear-cache", (req, res) => {
   res.json({ ok: true, message: "Cache cleared" });
 });
 
-// GET /health
 app.get("/health", (req, res) => res.json({ ok: true }));
 
 // ── Cron: daily at 6am ────────────────────────────────────────────────────────
