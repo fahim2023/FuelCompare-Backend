@@ -4,19 +4,16 @@ const { MongoClient } = require("mongodb");
 const cron = require("node-cron");
 require("dotenv").config({ path: ".env.local" });
 
-// ── Express setup ─────────────────────────────────────────────────────────────
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ── GOV.UK API URLs ───────────────────────────────────────────────────────────
 const TOKEN_URL =
   "https://www.fuel-finder.service.gov.uk/api/v1/oauth/generate_access_token";
 const SITES_URL = "https://www.fuel-finder.service.gov.uk/api/v1/pfs";
 const PRICES_URL =
   "https://www.fuel-finder.service.gov.uk/api/v1/pfs/fuel-prices";
 
-// ── Retailer feeds ────────────────────────────────────────────────────────────
 const RETAILERS = [
   { name: "Asda", url: "https://storelocator.asda.com/fuel_prices_data.json" },
   {
@@ -46,7 +43,6 @@ const RETAILERS = [
   },
 ];
 
-// ── Date formatter ────────────────────────────────────────────────────────────
 function formatDate(d) {
   const day = String(d.getDate()).padStart(2, "0");
   const month = String(d.getMonth() + 1).padStart(2, "0");
@@ -57,13 +53,11 @@ function formatDate(d) {
   return `${day}.${month}.${year} ${hours}:${mins}:${secs}`;
 }
 
-// ── In-memory cache ───────────────────────────────────────────────────────────
 let cachedToken = null;
 let tokenExpiry = 0;
 let cachedStations = null;
 let stationsExpiry = 0;
 
-// ── MongoDB ───────────────────────────────────────────────────────────────────
 const MONGODB_URI = process.env.MONGODB_URI;
 let db = null;
 
@@ -76,7 +70,6 @@ async function getDb() {
   return db;
 }
 
-// ── GOV.UK token ──────────────────────────────────────────────────────────────
 async function getToken() {
   if (cachedToken && Date.now() < tokenExpiry - 60_000) return cachedToken;
   const clientId = process.env.FUEL_CLIENT_ID;
@@ -110,7 +103,6 @@ async function getToken() {
   return cachedToken;
 }
 
-// ── Fetch GOV.UK stations ─────────────────────────────────────────────────────
 async function fetchGovStations() {
   const token = await getToken();
   const allSites = [];
@@ -155,7 +147,6 @@ async function fetchGovStations() {
     if (Array.isArray(p.fuel_prices)) {
       for (const fp of p.fuel_prices) {
         if (fp.fuel_type && fp.price != null) {
-          // Use fuel_type as-is (B7S, B7P, E10, E5, B10, HVO)
           const fuelType = fp.fuel_type;
           if (fp.price >= 100 && fp.price <= 220) prices[fuelType] = fp.price;
         }
@@ -218,7 +209,6 @@ async function fetchGovStations() {
     .filter((s) => s.lat != null && s.lng != null);
 }
 
-// ── Fetch retailer feeds ──────────────────────────────────────────────────────
 async function fetchRetailer(retailer) {
   const res = await fetch(retailer.url, {
     headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
@@ -258,7 +248,6 @@ async function fetchRetailerStations() {
   return stations;
 }
 
-// ── Save daily snapshot ───────────────────────────────────────────────────────
 async function saveDailySnapshot() {
   try {
     const database = await getDb();
@@ -336,7 +325,7 @@ async function saveDailySnapshot() {
 
     // 2. Insert price history records
     const priceCol = database.collection("price_history");
-    const VALID_FUEL_TYPES = ["E10", "B7S", "E5", "B7P", "B10", "HVO"];
+    const VALID_FUEL_TYPES = ["E10", "B7", "E5", "B10", "HVO"];
     const priceRecords = [];
 
     for (const s of allStations) {
@@ -361,7 +350,7 @@ async function saveDailySnapshot() {
     console.log(`[snapshot] Inserted ${priceRecords.length} price records`);
 
     // 3. Save national averages snapshot
-    const buckets = { E10: [], B7S: [], E5: [], B7P: [], B10: [], HVO: [] };
+    const buckets = { E10: [], B7: [], E5: [], B10: [], HVO: [] };
     for (const r of priceRecords) {
       if (buckets[r.fuelType]) buckets[r.fuelType].push(r.price);
     }
@@ -370,7 +359,6 @@ async function saveDailySnapshot() {
       arr.length ?
         Math.round((arr.reduce((a, b) => a + b, 0) / arr.length) * 10) / 10
       : null;
-
     const minOf = (arr) =>
       arr.length ? Math.round(Math.min(...arr) * 10) / 10 : null;
     const maxOf = (arr) =>
@@ -379,15 +367,14 @@ async function saveDailySnapshot() {
     const snapshot = {
       date: today,
       avg_e10: avg(buckets.E10),
-      avg_b7s: avg(buckets.B7S),
+      avg_b7: avg(buckets.B7),
       avg_e5: avg(buckets.E5),
-      avg_b7p: avg(buckets.B7P),
       avg_b10: avg(buckets.B10),
       avg_hvo: avg(buckets.HVO),
       min_e10: minOf(buckets.E10),
       max_e10: maxOf(buckets.E10),
-      min_b7s: minOf(buckets.B7S),
-      max_b7s: maxOf(buckets.B7S),
+      min_b7: minOf(buckets.B7),
+      max_b7: maxOf(buckets.B7),
       station_count: allStations.length,
       price_records: priceRecords.length,
       source: "gov",
@@ -396,7 +383,7 @@ async function saveDailySnapshot() {
 
     await snapshotCol.insertOne(snapshot);
     console.log(
-      `[snapshot] Done: E10=${snapshot.avg_e10}p, B7S=${snapshot.avg_b7s}p, records=${priceRecords.length}`,
+      `[snapshot] Done: E10=${snapshot.avg_e10}p, B7=${snapshot.avg_b7}p, records=${priceRecords.length}`,
     );
     return { success: true, snapshot };
   } catch (err) {
@@ -586,7 +573,6 @@ app.get("/price-stats", async (req, res) => {
       "Friday",
       "Saturday",
     ];
-
     const cheapestDay =
       dayAggs.length ?
         {
@@ -772,7 +758,6 @@ app.get("/clear-cache", (req, res) => {
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-// ── Cron: daily at 6am ────────────────────────────────────────────────────────
 cron.schedule("0 6 * * *", async () => {
   console.log("[cron] Running daily snapshot...");
   await saveDailySnapshot().catch((err) =>
@@ -781,6 +766,5 @@ cron.schedule("0 6 * * *", async () => {
 });
 console.log("Daily snapshot cron scheduled at 6am");
 
-// ── Start ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`UK Fuel Proxy running on port ${PORT}`));
