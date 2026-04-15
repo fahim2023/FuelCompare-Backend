@@ -147,7 +147,10 @@ async function fetchGovStations() {
     if (Array.isArray(p.fuel_prices)) {
       for (const fp of p.fuel_prices) {
         if (fp.fuel_type && fp.price != null) {
-          const fuelType = fp.fuel_type;
+          const fuelType =
+            fp.fuel_type.includes("_") ?
+              fp.fuel_type.split("_")[0]
+            : fp.fuel_type;
           if (fp.price >= 100 && fp.price <= 220) prices[fuelType] = fp.price;
         }
         if (
