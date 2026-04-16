@@ -296,6 +296,29 @@ async function updateLivePrices() {
     const stationsCol = database.collection("stations");
     const nowFormatted = formatDate(new Date());
 
+    // Mark retailer duplicate stations as inactive if GOV.UK has the same postcode
+    // This fixes cases like Applegreen vs EG On The Move at the same location
+    const govPostcodeSet = new Set(
+      govStations.map((s) => s.postcode?.trim().toUpperCase()).filter(Boolean),
+    );
+    const retailerDuplicateIds = retailerStations
+      .filter((s) => {
+        const pc = s.postcode?.trim().toUpperCase();
+        return pc && govPostcodeSet.has(pc);
+      })
+      .map((s) => s.id);
+
+    if (retailerDuplicateIds.length > 0) {
+      await stationsCol.updateMany(
+        { stationId: { $in: retailerDuplicateIds } },
+        { $set: { active: false, deactivatedAt: nowFormatted } },
+      );
+      await liveCol.deleteMany({ stationId: { $in: retailerDuplicateIds } });
+      console.log(
+        `[live] Deactivated ${retailerDuplicateIds.length} retailer duplicates superseded by GOV.UK data`,
+      );
+    }
+
     // Upsert live prices — one doc per station, overwrites every 10 mins
     const livePriceOps = allStations.map((s) => ({
       updateOne: {
@@ -583,7 +606,7 @@ app.get("/fuel-stations/nearby", async (req, res) => {
         const distance = haversineMiles(lat, lng, s.lat, s.lng);
         return {
           id: s.stationId,
-          brand: live.brand || s.brand,
+          brand: s.brand,
           address: s.address,
           town: s.town || "",
           county: s.county || "",
@@ -665,7 +688,7 @@ app.get("/fuel-stations", async (req, res) => {
         const live = priceMap[s.stationId] || {};
         return {
           id: s.stationId,
-          brand: live.brand || s.brand,
+          brand: s.brand,
           address: s.address,
           town: s.town || "",
           county: s.county || "",
@@ -717,9 +740,7 @@ app.get("/station/:id", async (req, res) => {
       });
     }
 
-    // Use live brand if available (overrides stale brand in stations collection)
-    const liveBrand = live?.brand || station.brand;
-    res.json({ ...station, brand: liveBrand, prices, fuels: prices });
+    res.json({ ...station, prices, fuels: prices });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
