@@ -53,6 +53,19 @@ function formatDate(d) {
   return `${day}.${month}.${year} ${hours}:${mins}:${secs}`;
 }
 
+// ── Haversine distance (miles) ────────────────────────────────────────────────
+function haversineMiles(lat1, lon1, lat2, lon2) {
+  const R = 3958.8;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 let cachedToken = null;
 let tokenExpiry = 0;
 
@@ -488,6 +501,114 @@ async function saveDailySnapshot() {
 }
 
 // ── Routes ────────────────────────────────────────────────────────────────────
+
+// GET /fuel-stations/nearby — fast filtered endpoint served from MongoDB
+app.get("/fuel-stations/nearby", async (req, res) => {
+  try {
+    const lat = parseFloat(req.query.lat);
+    const lng = parseFloat(req.query.lng);
+    const radius = parseFloat(req.query.radius) || 5;
+
+    if (isNaN(lat) || isNaN(lng))
+      return res.status(400).json({ error: "lat and lng are required" });
+
+    const database = await getDb();
+    const liveCol = database.collection("live_prices");
+    const stCol = database.collection("stations");
+
+    const liveCount = await liveCol.countDocuments();
+
+    if (liveCount === 0) {
+      // No live data yet — fall back to full fetch
+      console.log("[nearby] No live_prices data, falling back to API");
+      let govStations = [];
+      try {
+        govStations = await fetchGovStations();
+      } catch (e) {
+        console.warn(e.message);
+      }
+      const retailerStations = await fetchRetailerStations();
+      const govPostcodes = new Set(
+        govStations
+          .map((s) => s.postcode?.trim().toUpperCase())
+          .filter(Boolean),
+      );
+      const uniqueRetailer = retailerStations.filter((s) => {
+        const pc = s.postcode?.trim().toUpperCase();
+        return !pc || !govPostcodes.has(pc);
+      });
+      const all = [...govStations, ...uniqueRetailer];
+      const nearby = all
+        .filter((s) => s.lat && s.lng)
+        .map((s) => ({
+          ...s,
+          distance: haversineMiles(lat, lng, s.lat, s.lng),
+        }))
+        .filter((s) => s.distance <= radius + 2);
+      return res.json({ stations: nearby, count: nearby.length });
+    }
+
+    // Add a generous buffer to account for radius
+    const buffer = (radius + 2) * 0.0145;
+    const lngFactor = Math.cos((lat * Math.PI) / 180);
+
+    // Pre-filter by bounding box in MongoDB for speed
+    const [stationDocs, liveDocs] = await Promise.all([
+      stCol
+        .find({
+          active: true,
+          lat: { $gte: lat - buffer, $lte: lat + buffer },
+          lng: {
+            $gte: lng - buffer / lngFactor,
+            $lte: lng + buffer / lngFactor,
+          },
+        })
+        .toArray(),
+      liveCol.find({}).toArray(),
+    ]);
+
+    const priceMap = {};
+    for (const l of liveDocs) {
+      priceMap[l.stationId] = {
+        prices: l.prices || {},
+        priceLastUpdated: l.priceLastUpdated || null,
+        lastRefreshed: l.lastRefreshed || null,
+      };
+    }
+
+    const stations = stationDocs
+      .map((s) => {
+        const live = priceMap[s.stationId] || {};
+        const distance = haversineMiles(lat, lng, s.lat, s.lng);
+        return {
+          id: s.stationId,
+          brand: s.brand,
+          address: s.address,
+          town: s.town || "",
+          county: s.county || "",
+          postcode: s.postcode || "",
+          lat: s.lat,
+          lng: s.lng,
+          prices: live.prices || {},
+          priceLastUpdated: live.priceLastUpdated || null,
+          lastRefreshed: live.lastRefreshed || null,
+          phone: s.phone || null,
+          isMotorway: s.isMotorway || false,
+          isSupermarket: s.isSupermarket || false,
+          is24Hours: s.is24Hours || false,
+          openingHours: s.openingHours || null,
+          source: s.source,
+          distance,
+        };
+      })
+      .filter((s) => s.lat != null && s.lng != null && s.distance <= radius + 2)
+      .sort((a, b) => a.distance - b.distance);
+
+    res.json({ stations, count: stations.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // GET /fuel-stations — now served from MongoDB live_prices + stations
 app.get("/fuel-stations", async (req, res) => {
