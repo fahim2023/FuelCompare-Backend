@@ -303,6 +303,7 @@ async function updateLivePrices() {
         update: {
           $set: {
             stationId: s.id,
+            brand: s.brand,
             prices: s.prices || {},
             priceLastUpdated: s.priceLastUpdated || null,
             source: s.source,
@@ -582,7 +583,7 @@ app.get("/fuel-stations/nearby", async (req, res) => {
         const distance = haversineMiles(lat, lng, s.lat, s.lng);
         return {
           id: s.stationId,
-          brand: s.brand,
+          brand: live.brand || s.brand,
           address: s.address,
           town: s.town || "",
           county: s.county || "",
@@ -664,7 +665,7 @@ app.get("/fuel-stations", async (req, res) => {
         const live = priceMap[s.stationId] || {};
         return {
           id: s.stationId,
-          brand: s.brand,
+          brand: live.brand || s.brand,
           address: s.address,
           town: s.town || "",
           county: s.county || "",
@@ -716,7 +717,9 @@ app.get("/station/:id", async (req, res) => {
       });
     }
 
-    res.json({ ...station, prices, fuels: prices });
+    // Use live brand if available (overrides stale brand in stations collection)
+    const liveBrand = live?.brand || station.brand;
+    res.json({ ...station, brand: liveBrand, prices, fuels: prices });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
