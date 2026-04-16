@@ -55,8 +55,9 @@ function formatDate(d) {
 
 let cachedToken = null;
 let tokenExpiry = 0;
-let cachedStations = null;
-let stationsExpiry = 0;
+
+// Track if a live price update is already running to prevent overlaps
+let liveUpdateRunning = false;
 
 const MONGODB_URI = process.env.MONGODB_URI;
 let db = null;
@@ -169,7 +170,6 @@ async function fetchGovStations() {
         prices: {},
         priceLastUpdated: null,
       };
-
       const openingHours =
         s.opening_times?.usual_days ?
           {
@@ -182,12 +182,10 @@ async function fetchGovStations() {
             sunday: s.opening_times.usual_days.sunday || null,
           }
         : null;
-
       const is24Hours =
         openingHours ?
           Object.values(openingHours).some((d) => d?.is_24_hours === true)
         : false;
-
       return {
         id: s.node_id,
         brand: s.brand_name || s.trading_name || "Unknown",
@@ -251,6 +249,100 @@ async function fetchRetailerStations() {
   return stations;
 }
 
+// ── Update live prices in MongoDB (runs every 10 mins) ────────────────────────
+async function updateLivePrices() {
+  if (liveUpdateRunning) {
+    console.log("[live] Update already running, skipping");
+    return;
+  }
+  liveUpdateRunning = true;
+  try {
+    console.log("[live] Fetching fresh station data...");
+    const govStations = await fetchGovStations().catch((err) => {
+      console.warn("[live] GOV.UK failed:", err.message);
+      return [];
+    });
+    const retailerStations = await fetchRetailerStations();
+
+    const govPostcodes = new Set(
+      govStations.map((s) => s.postcode?.trim().toUpperCase()).filter(Boolean),
+    );
+    const uniqueRetailer = retailerStations.filter((s) => {
+      const pc = s.postcode?.trim().toUpperCase();
+      return !pc || !govPostcodes.has(pc);
+    });
+    const allStations = [...govStations, ...uniqueRetailer];
+
+    if (allStations.length === 0) {
+      console.warn("[live] No stations fetched, skipping update");
+      return;
+    }
+
+    const database = await getDb();
+    const liveCol = database.collection("live_prices");
+    const stationsCol = database.collection("stations");
+    const nowFormatted = formatDate(new Date());
+
+    // Upsert live prices — one doc per station, overwrites every 10 mins
+    const livePriceOps = allStations.map((s) => ({
+      updateOne: {
+        filter: { stationId: s.id },
+        update: {
+          $set: {
+            stationId: s.id,
+            prices: s.prices || {},
+            priceLastUpdated: s.priceLastUpdated || null,
+            source: s.source,
+            lastRefreshed: nowFormatted,
+          },
+        },
+        upsert: true,
+      },
+    }));
+
+    for (let i = 0; i < livePriceOps.length; i += 1000)
+      await liveCol.bulkWrite(livePriceOps.slice(i, i + 1000));
+
+    // Also upsert station static info
+    const stationOps = allStations.map((s) => ({
+      updateOne: {
+        filter: { stationId: s.id },
+        update: {
+          $set: {
+            stationId: s.id,
+            brand: s.brand,
+            address: s.address,
+            town: s.town || "",
+            county: s.county || "",
+            postcode: s.postcode,
+            lat: s.lat,
+            lng: s.lng,
+            source: s.source,
+            active: true,
+            lastSeen: nowFormatted,
+            phone: s.phone || null,
+            isMotorway: s.isMotorway || false,
+            isSupermarket: s.isSupermarket || false,
+            is24Hours: s.is24Hours || false,
+            openingHours: s.openingHours || null,
+          },
+        },
+        upsert: true,
+      },
+    }));
+
+    for (let i = 0; i < stationOps.length; i += 1000)
+      await stationsCol.bulkWrite(stationOps.slice(i, i + 1000));
+
+    console.log(`[live] Updated ${allStations.length} stations in MongoDB`);
+  } catch (err) {
+    console.error("[live] Update failed:", err.message);
+  } finally {
+    liveUpdateRunning = false;
+  }
+}
+
+// ── Save daily snapshot ───────────────────────────────────────────────────────
 async function saveDailySnapshot() {
   try {
     const database = await getDb();
@@ -397,37 +489,87 @@ async function saveDailySnapshot() {
 
 // ── Routes ────────────────────────────────────────────────────────────────────
 
+// GET /fuel-stations — now served from MongoDB live_prices + stations
 app.get("/fuel-stations", async (req, res) => {
   try {
-    if (cachedStations && Date.now() < stationsExpiry)
-      return res.json(cachedStations);
+    const database = await getDb();
+    const liveCol = database.collection("live_prices");
+    const stCol = database.collection("stations");
 
-    let govStations = [];
-    try {
-      govStations = await fetchGovStations();
-    } catch (err) {
-      console.warn(`GOV.UK failed: ${err.message}`);
+    // Check if we have live price data
+    const liveCount = await liveCol.countDocuments();
+    if (liveCount === 0) {
+      // No live data yet — fall back to live API fetch
+      console.log("[fuel-stations] No live_prices data, falling back to API");
+      let govStations = [];
+      try {
+        govStations = await fetchGovStations();
+      } catch (e) {
+        console.warn(e.message);
+      }
+      const retailerStations = await fetchRetailerStations();
+      const govPostcodes = new Set(
+        govStations
+          .map((s) => s.postcode?.trim().toUpperCase())
+          .filter(Boolean),
+      );
+      const uniqueRetailer = retailerStations.filter((s) => {
+        const pc = s.postcode?.trim().toUpperCase();
+        return !pc || !govPostcodes.has(pc);
+      });
+      const stations = [...govStations, ...uniqueRetailer];
+      return res.json({ stations, count: stations.length });
     }
 
-    const retailerStations = await fetchRetailerStations();
-    const govPostcodes = new Set(
-      govStations.map((s) => s.postcode?.trim().toUpperCase()).filter(Boolean),
-    );
-    const uniqueRetailer = retailerStations.filter((s) => {
-      const pc = s.postcode?.trim().toUpperCase();
-      return !pc || !govPostcodes.has(pc);
-    });
+    // Serve from MongoDB — fast!
+    const [stationDocs, liveDocs] = await Promise.all([
+      stCol.find({ active: true }).toArray(),
+      liveCol.find({}).toArray(),
+    ]);
 
-    const stations = [...govStations, ...uniqueRetailer];
-    const response = { stations, count: stations.length };
-    cachedStations = response;
-    stationsExpiry = Date.now() + 10 * 60 * 1000;
-    res.json(response);
+    // Build a price map from live_prices
+    const priceMap = {};
+    for (const l of liveDocs) {
+      priceMap[l.stationId] = {
+        prices: l.prices || {},
+        priceLastUpdated: l.priceLastUpdated || null,
+        lastRefreshed: l.lastRefreshed || null,
+      };
+    }
+
+    // Merge station info with live prices
+    const stations = stationDocs
+      .map((s) => {
+        const live = priceMap[s.stationId] || {};
+        return {
+          id: s.stationId,
+          brand: s.brand,
+          address: s.address,
+          town: s.town || "",
+          county: s.county || "",
+          postcode: s.postcode || "",
+          lat: s.lat,
+          lng: s.lng,
+          prices: live.prices || {},
+          priceLastUpdated: live.priceLastUpdated || null,
+          lastRefreshed: live.lastRefreshed || null,
+          phone: s.phone || null,
+          isMotorway: s.isMotorway || false,
+          isSupermarket: s.isSupermarket || false,
+          is24Hours: s.is24Hours || false,
+          openingHours: s.openingHours || null,
+          source: s.source,
+        };
+      })
+      .filter((s) => s.lat != null && s.lng != null);
+
+    res.json({ stations, count: stations.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// GET /station/:id — serve from live_prices for freshest data
 app.get("/station/:id", async (req, res) => {
   try {
     const database = await getDb();
@@ -436,16 +578,22 @@ app.get("/station/:id", async (req, res) => {
       .findOne({ stationId: req.params.id });
     if (!station) return res.status(404).json({ error: "Station not found" });
 
-    const today = new Date().toISOString().slice(0, 10);
-    const priceRecords = await database
-      .collection("price_history")
-      .find({ stationId: req.params.id, snapshotDate: today })
-      .toArray();
+    // Try live_prices first, fall back to today's price_history
+    const live = await database
+      .collection("live_prices")
+      .findOne({ stationId: req.params.id });
+    let prices = live?.prices || {};
 
-    const prices = {};
-    priceRecords.forEach((r) => {
-      prices[r.fuelType] = r.price;
-    });
+    if (!Object.keys(prices).length) {
+      const today = new Date().toISOString().slice(0, 10);
+      const priceRecords = await database
+        .collection("price_history")
+        .find({ stationId: req.params.id, snapshotDate: today })
+        .toArray();
+      priceRecords.forEach((r) => {
+        prices[r.fuelType] = r.price;
+      });
+    }
 
     res.json({ ...station, prices, fuels: prices });
   } catch (err) {
@@ -459,13 +607,11 @@ app.get("/price-history", async (req, res) => {
     const days = parseInt(req.query.days) || 90;
     const since = new Date();
     since.setDate(since.getDate() - days);
-
     const snapshots = await database
       .collection("fuel_price_snapshots")
       .find({ date: { $gte: since.toISOString().slice(0, 10) } })
       .sort({ date: 1 })
       .toArray();
-
     res.json({ snapshots, count: snapshots.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -478,7 +624,6 @@ app.get("/station-history/:stationId", async (req, res) => {
     const days = parseInt(req.query.days) || 90;
     const since = new Date();
     since.setDate(since.getDate() - days);
-
     const records = await database
       .collection("price_history")
       .find({
@@ -487,14 +632,12 @@ app.get("/station-history/:stationId", async (req, res) => {
       })
       .sort({ snapshotDate: 1 })
       .toArray();
-
     const byDate = {};
     for (const r of records) {
       if (!byDate[r.snapshotDate])
         byDate[r.snapshotDate] = { date: r.snapshotDate };
       byDate[r.snapshotDate][r.fuelType] = r.price;
     }
-
     res.json({
       history: Object.values(byDate).sort((a, b) =>
         a.date.localeCompare(b.date),
@@ -510,7 +653,6 @@ app.get("/price-stats", async (req, res) => {
     const database = await getDb();
     const fuelType = req.query.fuelType || "E10";
     const dbFuelField = `avg_${fuelType.toLowerCase()}`;
-
     const since14 = new Date();
     since14.setDate(since14.getDate() - 14);
     const snapshots = await database
@@ -518,24 +660,20 @@ app.get("/price-stats", async (req, res) => {
       .find({ date: { $gte: since14.toISOString().slice(0, 10) } })
       .sort({ date: 1 })
       .toArray();
-
     const thisWeek = snapshots.slice(-7);
     const lastWeek = snapshots.slice(-14, -7);
-
     const avg = (arr, field) => {
       const vals = arr.map((s) => s[field]).filter((v) => v != null);
       return vals.length ?
           Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 10) / 10
         : null;
     };
-
     const thisWeekAvg = avg(thisWeek, dbFuelField);
     const lastWeekAvg = avg(lastWeek, dbFuelField);
     const weekOnWeek =
       thisWeekAvg && lastWeekAvg ?
         Math.round((thisWeekAvg - lastWeekAvg) * 10) / 10
       : null;
-
     const last3 = snapshots
       .slice(-3)
       .map((s) => s[dbFuelField])
@@ -544,7 +682,6 @@ app.get("/price-stats", async (req, res) => {
       last3.length >= 2 ?
         Math.round((last3[last3.length - 1] - last3[0]) * 10) / 10
       : null;
-
     const since90 = new Date();
     since90.setDate(since90.getDate() - 90);
     const dayAggs = await database
@@ -566,7 +703,6 @@ app.get("/price-stats", async (req, res) => {
         { $sort: { avgPrice: 1 } },
       ])
       .toArray();
-
     const DAY_NAMES = [
       "Sunday",
       "Monday",
@@ -598,7 +734,6 @@ app.get("/price-stats", async (req, res) => {
         count: d.count,
       }))
       .sort((a, b) => a.dayIndex - b.dayIndex);
-
     res.json({
       fuelType,
       thisWeekAvg,
@@ -621,7 +756,6 @@ app.get("/brand-averages", async (req, res) => {
     const days = parseInt(req.query.days) || 7;
     const since = new Date();
     since.setDate(since.getDate() - days);
-
     const results = await database
       .collection("price_history")
       .aggregate([
@@ -645,7 +779,6 @@ app.get("/brand-averages", async (req, res) => {
         { $limit: 20 },
       ])
       .toArray();
-
     const brands = results.map((r) => ({
       brand: r._id,
       avgPrice: Math.round(r.avgPrice * 10) / 10,
@@ -653,7 +786,6 @@ app.get("/brand-averages", async (req, res) => {
       maxPrice: Math.round(r.maxPrice * 10) / 10,
       count: r.count,
     }));
-
     res.json({ brands, fuelType, days });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -667,7 +799,6 @@ app.get("/regional-averages", async (req, res) => {
     const days = parseInt(req.query.days) || 7;
     const since = new Date();
     since.setDate(since.getDate() - days);
-
     const results = await database
       .collection("price_history")
       .aggregate([
@@ -675,7 +806,6 @@ app.get("/regional-averages", async (req, res) => {
           $match: {
             fuelType,
             snapshotDate: { $gte: since.toISOString().slice(0, 10) },
-            county: { $ne: "" },
           },
         },
         {
@@ -687,11 +817,10 @@ app.get("/regional-averages", async (req, res) => {
             count: { $sum: 1 },
           },
         },
-        { $match: { count: { $gte: 5 } } },
+        { $match: { count: { $gte: 5 }, _id: { $ne: "" } } },
         { $sort: { avgPrice: 1 } },
       ])
       .toArray();
-
     const regions = results.map((r) => ({
       county: r._id,
       avgPrice: Math.round(r.avgPrice * 10) / 10,
@@ -699,7 +828,6 @@ app.get("/regional-averages", async (req, res) => {
       maxPrice: Math.round(r.maxPrice * 10) / 10,
       count: r.count,
     }));
-
     res.json({ regions, fuelType, days });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -712,20 +840,17 @@ app.get("/cheapest", async (req, res) => {
     const fuelType = req.query.fuelType || "E10";
     const date = req.query.date || new Date().toISOString().slice(0, 10);
     const limit = parseInt(req.query.limit) || 10;
-
     const records = await database
       .collection("price_history")
       .find({ fuelType, snapshotDate: date })
       .sort({ price: 1 })
       .limit(limit)
       .toArray();
-
     const stationIds = records.map((r) => r.stationId);
     const stations = await database
       .collection("stations")
       .find({ stationId: { $in: stationIds }, active: true })
       .toArray();
-
     const stationMap = Object.fromEntries(
       stations.map((s) => [s.stationId, s]),
     );
@@ -735,7 +860,6 @@ app.get("/cheapest", async (req, res) => {
       fuelType: r.fuelType,
       date: r.snapshotDate,
     }));
-
     res.json({ results, count: results.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -751,16 +875,30 @@ app.post("/save-snapshot", async (req, res) => {
   }
 });
 
+// POST /update-live — manually trigger live price update
+app.post("/update-live", async (req, res) => {
+  try {
+    await updateLivePrices();
+    res.json({ ok: true, message: "Live prices updated" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/clear-cache", (req, res) => {
-  cachedStations = null;
-  stationsExpiry = 0;
-  cachedToken = null;
-  tokenExpiry = 0;
-  res.json({ ok: true, message: "Cache cleared" });
+  res.json({ ok: true, message: "Cache cleared (now served from MongoDB)" });
 });
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 
+// ── Cron: update live prices every 10 minutes ─────────────────────────────────
+cron.schedule("*/10 * * * *", async () => {
+  console.log("[cron] Updating live prices...");
+  await updateLivePrices();
+});
+console.log("Live price update cron scheduled every 10 minutes");
+
+// ── Cron: daily snapshot at 6am ───────────────────────────────────────────────
 cron.schedule("0 6 * * *", async () => {
   console.log("[cron] Running daily snapshot...");
   await saveDailySnapshot().catch((err) =>
@@ -768,6 +906,12 @@ cron.schedule("0 6 * * *", async () => {
   );
 });
 console.log("Daily snapshot cron scheduled at 6am");
+
+// ── Trigger initial live price load on startup ────────────────────────────────
+getDb().then(() => {
+  console.log("[startup] Triggering initial live price load...");
+  updateLivePrices();
+});
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`UK Fuel Proxy running on port ${PORT}`));
