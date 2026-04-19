@@ -14,34 +14,34 @@ const SITES_URL = "https://www.fuel-finder.service.gov.uk/api/v1/pfs";
 const PRICES_URL =
   "https://www.fuel-finder.service.gov.uk/api/v1/pfs/fuel-prices";
 
-const RETAILERS = [
-  { name: "Asda", url: "https://storelocator.asda.com/fuel_prices_data.json" },
-  {
-    name: "Sainsbury's",
-    url: "https://api.sainsburys.co.uk/v1/exports/latest/fuel_prices_data.json",
-  },
-  { name: "Morrisons", url: "https://www.morrisons.com/fuel-prices/fuel.json" },
-  {
-    name: "Motor Fuel Group",
-    url: "https://fuel.motorfuelgroup.com/fuel_prices_data.json",
-  },
-  { name: "JET", url: "https://jetlocal.co.uk/fuel_prices_data.json" },
-  { name: "Esso", url: "https://fuelprices.esso.co.uk/latestdata.json" },
-  { name: "Ascona", url: "https://fuelprices.asconagroup.co.uk/newfuel.json" },
-  {
-    name: "Rontec",
-    url: "https://www.rontec-servicestations.co.uk/fuel-prices/data/fuel_prices_data.json",
-  },
-  {
-    name: "EG Group",
-    url: "https://applegreenstores.com/fuel-prices/data.json",
-  },
-  { name: "Moto", url: "https://moto-way.com/fuel-price/fuel_prices.json" },
-  {
-    name: "SGN",
-    url: "https://www.sgnretail.uk/files/data/SGN_daily_fuel_prices.json",
-  },
-];
+// const RETAILERS = [
+//   { name: "Asda", url: "https://storelocator.asda.com/fuel_prices_data.json" },
+//   {
+//     name: "Sainsbury's",
+//     url: "https://api.sainsburys.co.uk/v1/exports/latest/fuel_prices_data.json",
+//   },
+//   { name: "Morrisons", url: "https://www.morrisons.com/fuel-prices/fuel.json" },
+//   {
+//     name: "Motor Fuel Group",
+//     url: "https://fuel.motorfuelgroup.com/fuel_prices_data.json",
+//   },
+//   { name: "JET", url: "https://jetlocal.co.uk/fuel_prices_data.json" },
+//   { name: "Esso", url: "https://fuelprices.esso.co.uk/latestdata.json" },
+//   { name: "Ascona", url: "https://fuelprices.asconagroup.co.uk/newfuel.json" },
+//   {
+//     name: "Rontec",
+//     url: "https://www.rontec-servicestations.co.uk/fuel-prices/data/fuel_prices_data.json",
+//   },
+//   {
+//     name: "EG Group",
+//     url: "https://applegreenstores.com/fuel-prices/data.json",
+//   },
+//   { name: "Moto", url: "https://moto-way.com/fuel-price/fuel_prices.json" },
+//   {
+//     name: "SGN",
+//     url: "https://www.sgnretail.uk/files/data/SGN_daily_fuel_prices.json",
+//   },
+// ];
 
 function formatDate(d) {
   const day = String(d.getDate()).padStart(2, "0");
